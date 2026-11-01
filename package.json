@@ -1,0 +1,54 @@
+{
+  "name": "humkt-auto-buyer",
+  "version": "3.0.0",
+  "description": "HUMKT product restock monitor and guarded auto-order desktop application",
+  "main": "dist/main.js",
+  "author": "Local User",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.js",
+    "start": "npm run build && electron .",
+    "dist:win": "npm run build && electron-builder --win nsis portable --x64",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true});require('fs').rmSync('release',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "sql.js": "1.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.0",
+    "electron": "45.2.1",
+    "electron-builder": "26.0.12",
+    "typescript": "5.9.3"
+  },
+  "build": {
+    "appId": "com.humkt.autobuyer",
+    "productName": "HUMKT Auto Buyer",
+    "asar": true,
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "node_modules/sql.js/**/*"
+    ],
+    "extraResources": [
+      { "from": "dist/worker.js", "to": "worker.js" },
+      { "from": "node_modules/sql.js/dist/sql-wasm.wasm", "to": "sql-wasm.wasm" }
+    ],
+    "directories": { "output": "release" },
+    "artifactName": "HUMKT-AutoBuyer-${version}-${arch}.${ext}",
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "portable": { "artifactName": "HUMKT-AutoBuyer-${version}-Portable-${arch}.${ext}" }
+  }
+}
