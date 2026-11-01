@@ -7,10 +7,11 @@
   "license": "UNLICENSED",
   "private": true,
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-assets.js",
+    "build": "npm run verify:source && tsc -p tsconfig.json && node scripts/copy-assets.js",
     "start": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win nsis portable --x64",
-    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true});require('fs').rmSync('release',{recursive:true,force:true})\""
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true});require('fs').rmSync('release',{recursive:true,force:true})\"",
+    "verify:source": "node scripts/prepare-sources.js"
   },
   "dependencies": {
     "sql.js": "1.13.0"
@@ -31,15 +32,33 @@
       "node_modules/sql.js/**/*"
     ],
     "extraResources": [
-      { "from": "dist/worker.js", "to": "worker.js" },
-      { "from": "node_modules/sql.js/dist/sql-wasm.wasm", "to": "sql-wasm.wasm" }
+      {
+        "from": "dist/worker.js",
+        "to": "worker.js"
+      },
+      {
+        "from": "node_modules/sql.js/dist/sql-wasm.wasm",
+        "to": "sql-wasm.wasm"
+      }
     ],
-    "directories": { "output": "release" },
+    "directories": {
+      "output": "release"
+    },
     "artifactName": "HUMKT-AutoBuyer-${version}-${arch}.${ext}",
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {
@@ -49,6 +68,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     },
-    "portable": { "artifactName": "HUMKT-AutoBuyer-${version}-Portable-${arch}.${ext}" }
+    "portable": {
+      "artifactName": "HUMKT-AutoBuyer-${version}-Portable-${arch}.${ext}"
+    }
   }
 }
