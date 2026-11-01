@@ -9,7 +9,7 @@
   "scripts": {
     "build": "npm run verify:source && tsc -p tsconfig.json && node scripts/copy-assets.js",
     "start": "npm run build && electron .",
-    "dist:win": "npm run build && electron-builder --win nsis portable --x64",
+    "dist:win": "npm run build && electron-builder --win nsis portable --x64 --publish never",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true});require('fs').rmSync('release',{recursive:true,force:true})\"",
     "verify:source": "node scripts/prepare-sources.js"
   },
