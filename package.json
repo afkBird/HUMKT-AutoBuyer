@@ -1,6 +1,6 @@
 {
   "name": "humkt-auto-buyer",
-  "version": "3.0.0",
+  "version": "3.1.1",
   "description": "HUMKT product restock monitor and guarded auto-order desktop application",
   "main": "dist/main.js",
   "author": "Local User",
