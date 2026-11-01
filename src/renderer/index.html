@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>HUMKT Auto Buyer V3.0</title>
+  <title>HUMKT Auto Buyer V3.1.2</title>
   <link rel="stylesheet" href="styles.css">
   <script src="renderer.js" defer></script>
 </head>
@@ -14,7 +14,7 @@
       <div class="brand-wrap">
         <div class="brand-mark">H</div>
         <div>
-          <div class="brand-title">HUMKT Auto Buyer <span class="version">V3.0</span></div>
+          <div class="brand-title">HUMKT Auto Buyer <span class="version">V3.1.2</span></div>
           <div class="brand-subtitle">单商品补货监控 · 官方 API · Windows 桌面版</div>
         </div>
       </div>
@@ -82,9 +82,9 @@
               <div class="field-note">超过此价格不下单</div>
             </div>
             <div class="field-group">
-              <label for="quantity">每次购买数量</label>
-              <input id="quantity" type="number" min="1" max="50" step="1" value="1">
-              <div class="field-note">还需符合商品 min_qty / max_qty</div>
+              <label for="quantity">每次购买数量上限</label>
+              <input id="quantity" type="number" min="1" max="200" step="1" value="1">
+              <div class="field-note">实际购买量按设置上限、实时库存和平台 max_qty 自动取较小值；低于 min_qty 不下单</div>
             </div>
             <div class="field-group">
               <label for="dailyBudget">每日最高预算（CNY）</label>
@@ -147,7 +147,7 @@
         </div>
       </section>
 
-      <footer class="footer"><span>HUMKT Auto Buyer V3.0 · 独立本地程序</span><span>API Token 不会发送给 ChatGPT；所有 API 请求直接发往 HUMKT。</span></footer>
+      <footer class="footer"><span>HUMKT Auto Buyer V3.1.2 · 独立本地程序</span><span>API Token 不会发送给 ChatGPT；所有 API 请求直接发往 HUMKT。</span></footer>
     </main>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

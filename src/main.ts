@@ -27,6 +27,8 @@ let userDataPath = '';
 let settingsPath = '';
 let tokenPath = '';
 let isQuitting = false;
+let stopWorkerPromise = null;
+let shutdownPromise = null;
 
 function nowIso() {
   return new Date().toISOString();
@@ -72,26 +74,33 @@ function saveDatabase() {
 }
 
 function dbRun(sql, params = []) {
+  if (!database) throw new Error('数据库尚未初始化或已经关闭。');
   database.run(sql, params);
   saveDatabase();
 }
 
 function dbGet(sql, params = []) {
+  if (!database) throw new Error('数据库尚未初始化或已经关闭。');
   const statement = database.prepare(sql);
-  statement.bind(params);
-  let result = null;
-  if (statement.step()) result = statement.getAsObject();
-  statement.free();
-  return result;
+  try {
+    statement.bind(params);
+    return statement.step() ? statement.getAsObject() : null;
+  } finally {
+    statement.free();
+  }
 }
 
 function dbAll(sql, params = []) {
+  if (!database) throw new Error('数据库尚未初始化或已经关闭。');
   const statement = database.prepare(sql);
-  statement.bind(params);
   const rows = [];
-  while (statement.step()) rows.push(statement.getAsObject());
-  statement.free();
-  return rows;
+  try {
+    statement.bind(params);
+    while (statement.step()) rows.push(statement.getAsObject());
+    return rows;
+  } finally {
+    statement.free();
+  }
 }
 
 async function initializeDatabase() {
@@ -151,6 +160,7 @@ async function initializeDatabase() {
 }
 
 function appendEvent(level, message) {
+  if (!database) return;
   const safeMessage = String(message ?? '').slice(0, 1000);
   dbRun('INSERT INTO events (created_at, level, message) VALUES (?, ?, ?)', [nowIso(), level, safeMessage]);
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -178,7 +188,9 @@ function validateSettings(input) {
   const riskAccepted = Boolean(input.riskAccepted);
 
   if (!allowedIntervals.has(pollIntervalMs)) throw new Error('监听间隔无效。');
-  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 50) throw new Error('购买数量必须为 1–50 的整数。');
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 200) {
+    throw new Error('购买数量上限必须为 1–200 的整数。');
+  }
   if (maxUnitPrice && moneyToCents(maxUnitPrice) <= 0) throw new Error('最高单价格式无效。');
   if (dailyBudget && moneyToCents(dailyBudget) <= 0) throw new Error('每日预算格式无效。');
   if (autoBuyEnabled) {
@@ -227,7 +239,8 @@ async function apiGet(token, endpoint) {
   });
   const text = await response.text();
   let json;
-  try { json = JSON.parse(text); } catch { throw new Error(`API 返回非 JSON 内容（HTTP ${response.status}）。`); }
+  try { json = JSON.parse(text); }
+  catch { throw new Error(`API 返回非 JSON 内容（HTTP ${response.status}）。`); }
   if (!response.ok || json.code !== 1) {
     const message = json.message || json.error || `HTTP ${response.status}`;
     throw new Error(`${message}（HTTP ${response.status}）`);
@@ -298,31 +311,40 @@ function updateMonitorState(state) {
   dbRun(`UPDATE monitor_state
     SET initialized=?, last_stock=?, armed=?, unknown_order_lock=?, last_price_cents=?, updated_at=?
     WHERE id=1`, [
-      state.initialized ? 1 : 0,
-      Number(state.lastStock ?? -1),
-      state.armed ? 1 : 0,
-      state.unknownOrderLock ? 1 : 0,
-      Number(state.lastPriceCents || 0),
-      nowIso()
-    ]);
+    state.initialized ? 1 : 0,
+    Number(state.lastStock ?? -1),
+    state.armed ? 1 : 0,
+    state.unknownOrderLock ? 1 : 0,
+    Number(state.lastPriceCents || 0),
+    nowIso()
+  ]);
 }
 
 function handleWorkerMessage(message) {
-  if (!message || typeof message !== 'object') return;
+  if (!message || typeof message !== 'object' || !database) return;
+
   switch (message.type) {
-    case 'ack':
-      if (monitorWorker) monitorWorker.postMessage(message);
-      break;
     case 'log':
       appendEvent(message.level || 'info', message.message || '');
       break;
+
     case 'snapshot':
       sendToRenderer(message);
       break;
+
     case 'persist-state':
-      updateMonitorState(message.state || {});
-      if (message.requestId && monitorWorker) monitorWorker.postMessage({ type: 'ack', requestId: message.requestId, ok: true });
+      try {
+        updateMonitorState(message.state || {});
+        if (message.requestId && monitorWorker) {
+          monitorWorker.postMessage({ type: 'ack', requestId: message.requestId, ok: true });
+        }
+      } catch (error) {
+        if (message.requestId && monitorWorker) {
+          monitorWorker.postMessage({ type: 'ack', requestId: message.requestId, ok: false, error: error.message });
+        }
+      }
       break;
+
     case 'persist-attempt':
       try {
         dbRun(`INSERT OR IGNORE INTO attempts
@@ -331,20 +353,32 @@ function handleWorkerMessage(message) {
           message.attemptKey, nowIso(), Number(message.quantity), Number(message.estimatedAmountCents)
         ]);
         dbRun('UPDATE monitor_state SET unknown_order_lock=1, armed=0, updated_at=? WHERE id=1', [nowIso()]);
-        if (monitorWorker) monitorWorker.postMessage({ type: 'ack', requestId: message.requestId, ok: true });
+        if (message.requestId && monitorWorker) {
+          monitorWorker.postMessage({ type: 'ack', requestId: message.requestId, ok: true });
+        }
       } catch (error) {
-        if (monitorWorker) monitorWorker.postMessage({ type: 'ack', requestId: message.requestId, ok: false, error: error.message });
+        if (message.requestId && monitorWorker) {
+          monitorWorker.postMessage({ type: 'ack', requestId: message.requestId, ok: false, error: error.message });
+        }
       }
       break;
+
     case 'order-success': {
       const order = message.order || {};
       const amountCents = Number(message.amountCents ?? message.estimatedAmountCents ?? 0);
-      dbRun('UPDATE attempts SET status=?, detail=? WHERE attempt_key=?', ['success', `trx=${order.trx || ''}`, message.attemptKey]);
+      dbRun('UPDATE attempts SET status=?, detail=? WHERE attempt_key=?', [
+        'success', `trx=${order.trx || ''}`, message.attemptKey
+      ]);
       dbRun(`INSERT INTO orders (trx, order_id, product_id, quantity, amount_cents, status, created_at, raw_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
-        String(order.trx || ''), String(order.order_id || ''), PRODUCT_ID,
-        Number(order.qty || message.quantity || 1), amountCents,
-        String(order.status || 'unknown'), nowIso(), JSON.stringify(order)
+        String(order.trx || ''),
+        String(order.order_id || ''),
+        PRODUCT_ID,
+        Number(order.qty || message.quantity || 1),
+        amountCents,
+        String(order.status || 'unknown'),
+        nowIso(),
+        JSON.stringify(order)
       ]);
       dbRun('UPDATE monitor_state SET unknown_order_lock=0, armed=0, updated_at=? WHERE id=1', [nowIso()]);
       dbRun(`INSERT INTO daily_spend (spend_date, amount_cents) VALUES (?, ?)
@@ -353,18 +387,29 @@ function handleWorkerMessage(message) {
       sendToRenderer({ type: 'order-success', order, amount: centsToMoney(amountCents), dailySpent: centsToMoney(getDailySpend()) });
       break;
     }
+
     case 'order-rejected':
-      dbRun('UPDATE attempts SET status=?, detail=? WHERE attempt_key=?', [message.status || 'rejected', String(message.message || '').slice(0, 500), message.attemptKey]);
-      dbRun('UPDATE monitor_state SET unknown_order_lock=0, armed=?, updated_at=? WHERE id=1', [message.rearm ? 1 : 0, nowIso()]);
+      dbRun('UPDATE attempts SET status=?, detail=? WHERE attempt_key=?', [
+        message.status || 'rejected',
+        String(message.message || '').slice(0, 500),
+        message.attemptKey
+      ]);
+      dbRun('UPDATE monitor_state SET unknown_order_lock=0, armed=?, updated_at=? WHERE id=1', [
+        message.rearm ? 1 : 0, nowIso()
+      ]);
       appendEvent(message.level || 'warning', `订单未创建：${message.message || 'API 拒绝请求'}`);
       sendToRenderer({ type: 'order-rejected', message: message.message || 'API 拒绝请求' });
       break;
+
     case 'order-unknown':
-      dbRun('UPDATE attempts SET status=?, detail=? WHERE attempt_key=?', ['unknown', String(message.message || '结果未知').slice(0, 500), message.attemptKey]);
+      dbRun('UPDATE attempts SET status=?, detail=? WHERE attempt_key=?', [
+        'unknown', String(message.message || '结果未知').slice(0, 500), message.attemptKey
+      ]);
       dbRun('UPDATE monitor_state SET unknown_order_lock=1, armed=0, updated_at=? WHERE id=1', [nowIso()]);
       appendEvent('error', `订单结果未知，已锁定自动购买：${message.message || '请先核对 HUMKT 我的订单'}`);
       sendToRenderer({ type: 'unknown-order-lock', message: message.message || '请先核对 HUMKT 我的订单' });
       break;
+
     case 'auto-buy-paused': {
       const currentSettings = loadSettings();
       currentSettings.autoBuyEnabled = false;
@@ -373,22 +418,25 @@ function handleWorkerMessage(message) {
       sendToRenderer({ type: 'auto-buy-paused', message: message.message || '自动购买已暂停。' });
       break;
     }
+
     case 'fatal':
       appendEvent('error', message.message || '监听线程发生致命错误。');
       sendToRenderer({ type: 'fatal', message: message.message || '监听线程发生致命错误。' });
       break;
+
     case 'status':
       sendToRenderer(message);
-      break;
-    default:
       break;
   }
 }
 
 function startWorker() {
+  if (isQuitting) throw new Error('程序正在退出，不能启动监听。');
   if (monitorWorker) return { ok: true, alreadyRunning: true };
+
   const token = readToken();
   if (!token) throw new Error('请先保存 HUMKT API Token。');
+
   const settings = loadSettings();
   if (settings.autoBuyEnabled) {
     if (!settings.riskAccepted) throw new Error('自动购买风险确认未完成。');
@@ -396,8 +444,12 @@ function startWorker() {
       throw new Error('自动购买需要设置最高单价和每日预算。');
     }
   }
-  const workerPath = app.isPackaged ? path.join(process.resourcesPath, 'worker.js') : path.join(__dirname, 'worker.js');
-  monitorWorker = new Worker(workerPath, {
+
+  const workerPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'worker.js')
+    : path.join(__dirname, 'worker.js');
+
+  const worker = new Worker(workerPath, {
     workerData: {
       token,
       settings,
@@ -405,36 +457,126 @@ function startWorker() {
       dailySpentCents: getDailySpend()
     }
   });
-  monitorWorker.on('message', handleWorkerMessage);
-  monitorWorker.on('error', (error) => {
-    appendEvent('error', `监听线程异常：${error.message}`);
+
+  monitorWorker = worker;
+  worker.on('message', handleWorkerMessage);
+  worker.on('error', (error) => {
+    if (database) appendEvent('error', `监听线程异常：${error.message}`);
     sendToRenderer({ type: 'fatal', message: error.message });
   });
-  monitorWorker.on('exit', (code) => {
-    appendEvent(code === 0 ? 'info' : 'warning', `监听线程已退出（代码 ${code}）。`);
-    monitorWorker = null;
+  worker.on('exit', (code) => {
+    if (database) {
+      appendEvent(code === 0 ? 'info' : 'warning', `监听线程已退出（代码 ${code}）。`);
+    }
+    if (monitorWorker === worker) monitorWorker = null;
     sendToRenderer({ type: 'running', running: false });
   });
+
   appendEvent('info', `监听已启动：商品 ${PRODUCT_ID}，轮询目标 ${settings.pollIntervalMs}ms，自动购买 ${settings.autoBuyEnabled ? '开启' : '关闭'}。`);
   sendToRenderer({ type: 'running', running: true });
   return { ok: true };
 }
 
-async function stopWorker() {
-  if (!monitorWorker) return { ok: true };
-  const current = monitorWorker;
-  current.postMessage({ type: 'stop' });
-  await Promise.race([
-    new Promise((resolve) => current.once('exit', resolve)),
-    new Promise((resolve) => setTimeout(resolve, 2500))
-  ]);
-  if (monitorWorker === current) {
-    await current.terminate();
-    monitorWorker = null;
+function waitForWorkerExit(worker, timeoutMs) {
+  return new Promise((resolve) => {
+    if (!worker || worker.threadId === -1) {
+      resolve(true);
+      return;
+    }
+
+    let settled = false;
+    let timer = null;
+
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      worker.removeListener('exit', onExit);
+      resolve(exited);
+    };
+
+    const onExit = () => finish(true);
+    worker.once('exit', onExit);
+    timer = setTimeout(() => finish(false), timeoutMs);
+
+    if (worker.threadId === -1) finish(true);
+  });
+}
+
+async function stopWorker(options = {}) {
+  if (stopWorkerPromise) return stopWorkerPromise;
+
+  const worker = monitorWorker;
+  if (!worker) return { ok: true, alreadyStopped: true };
+
+  const quiet = Boolean(options.quiet);
+  const timeoutMs = Number(options.timeoutMs || 20000);
+
+  const operation = (async () => {
+    try {
+      worker.postMessage({ type: 'stop' });
+    } catch (error) {
+      console.warn('[shutdown] Failed to send worker stop:', error);
+    }
+
+    const exitedNormally = await waitForWorkerExit(worker, timeoutMs);
+
+    if (!exitedNormally) {
+      console.warn('[shutdown] Worker did not stop in time; terminating it.');
+      try {
+        await worker.terminate();
+      } catch (error) {
+        console.error('[shutdown] Worker termination failed:', error);
+      }
+    }
+
+    if (monitorWorker === worker) monitorWorker = null;
+
+    if (!quiet && database) {
+      appendEvent('info', exitedNormally ? '已正常停止监听。' : '监听线程超时，已强制终止。');
+      sendToRenderer({ type: 'running', running: false });
+    }
+
+    return { ok: true, forced: !exitedNormally };
+  })();
+
+  stopWorkerPromise = operation;
+  try {
+    return await operation;
+  } finally {
+    if (stopWorkerPromise === operation) stopWorkerPromise = null;
   }
-  appendEvent('info', '已停止监听。');
-  sendToRenderer({ type: 'running', running: false });
-  return { ok: true };
+}
+
+async function shutdownApp() {
+  if (shutdownPromise) return shutdownPromise;
+
+  isQuitting = true;
+  shutdownPromise = (async () => {
+    try {
+      await stopWorker({ quiet: true, timeoutMs: 22000 });
+    } catch (error) {
+      console.error('[shutdown] Worker shutdown error:', error);
+      if (monitorWorker) {
+        try { await monitorWorker.terminate(); }
+        catch (terminateError) { console.error('[shutdown] Forced termination failed:', terminateError); }
+        monitorWorker = null;
+      }
+    }
+
+    if (database) {
+      try { saveDatabase(); }
+      catch (error) { console.error('[shutdown] Database save failed:', error); }
+
+      try { database.close(); }
+      catch (error) { console.error('[shutdown] Database close failed:', error); }
+      finally { database = null; }
+    }
+
+    app.quit();
+  })();
+
+  return shutdownPromise;
 }
 
 async function createWindow() {
@@ -445,7 +587,7 @@ async function createWindow() {
     minHeight: 700,
     show: false,
     backgroundColor: '#0b1020',
-    title: 'HUMKT Auto Buyer V3.0',
+    title: 'HUMKT Auto Buyer V3.1.2',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -453,28 +595,36 @@ async function createWindow() {
       sandbox: true
     }
   });
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url === 'https://www.humkt.com/api-docs') shell.openExternal(url);
     return { action: 'deny' };
   });
+
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith('file://')) event.preventDefault();
   });
+
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
-    appendEvent('error', `界面渲染进程退出：${details.reason}。`);
+    if (database) appendEvent('error', `界面渲染进程退出：${details.reason}。`);
   });
+
   await mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.once('ready-to-show', () => {
+    if (!isQuitting && mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
+  });
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
 function registerIpc() {
   ipcMain.handle('app:get-initial-data', () => getInitialData());
+
   ipcMain.handle('token:save', (_event, token) => {
     saveToken(token);
     appendEvent('success', 'API Token 已通过 Windows 安全存储加密保存。');
     return { ok: true };
   });
+
   ipcMain.handle('api:test', async () => {
     const token = readToken();
     if (!token) throw new Error('尚未保存 API Token。');
@@ -482,21 +632,27 @@ function registerIpc() {
     appendEvent('success', `API 测试成功：${result.product.name}，当前库存 ${result.product.in_stock}，余额 ¥${result.balance}。`);
     return result;
   });
+
   ipcMain.handle('settings:save', (_event, input) => {
     const settings = saveSettings(input);
     appendEvent('info', '购买规则已保存。');
     return settings;
   });
+
   ipcMain.handle('monitor:start', async () => {
+    if (isQuitting) throw new Error('程序正在退出。');
     const token = readToken();
-    if (!token) throw new Error('请先保存 API Token。');
+    if (!token) throw new Error('请先保存 HUMKT API Token。');
     await testApiWithToken(token);
     return startWorker();
   });
+
   ipcMain.handle('monitor:stop', () => stopWorker());
+
   ipcMain.handle('order:unlock-unknown', async () => {
     const state = getMonitorState();
     if (!state.unknownOrderLock) return { ok: true, unlocked: false };
+
     const answer = await dialog.showMessageBox(mainWindow, {
       type: 'warning',
       title: '核对未知订单',
@@ -507,6 +663,7 @@ function registerIpc() {
       cancelId: 0,
       noLink: true
     });
+
     if (answer.response !== 1) return { ok: true, unlocked: false };
     dbRun("UPDATE attempts SET status='manual-reviewed' WHERE status='unknown'");
     dbRun('UPDATE monitor_state SET unknown_order_lock=0, armed=0, updated_at=? WHERE id=1', [nowIso()]);
@@ -516,13 +673,14 @@ function registerIpc() {
 }
 
 app.setAppUserModelId('com.humkt.autobuyer');
+
 app.whenReady().then(async () => {
   try {
     ensureDirectories();
     await initializeDatabase();
     registerIpc();
     await createWindow();
-    appendEvent('info', 'HUMKT Auto Buyer V3.0 已启动。自动购买默认关闭。');
+    appendEvent('info', 'HUMKT Auto Buyer V3.1.2 已启动。自动购买默认关闭。');
   } catch (error) {
     dialog.showErrorBox('HUMKT Auto Buyer 启动失败', error.stack || error.message);
     app.quit();
@@ -530,13 +688,23 @@ app.whenReady().then(async () => {
 });
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  if (!isQuitting && BrowserWindow.getAllWindows().length === 0) {
+    createWindow().catch((error) => {
+      dialog.showErrorBox('窗口启动失败', error.stack || error.message);
+    });
+  }
 });
 
-app.on('before-quit', () => {
-  isQuitting = true;
-  if (monitorWorker) monitorWorker.terminate();
-  if (database) saveDatabase();
+app.on('before-quit', (event) => {
+  if (isQuitting) return;
+
+  // Hold the quit event until the worker has stopped and SQLite is closed.
+  event.preventDefault();
+  shutdownApp().catch((error) => {
+    console.error('[shutdown] Fatal shutdown error:', error);
+    isQuitting = true;
+    app.quit();
+  });
 });
 
 app.on('window-all-closed', () => {
